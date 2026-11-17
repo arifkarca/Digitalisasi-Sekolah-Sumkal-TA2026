@@ -98,7 +98,7 @@ function bootDashboard() {
 function initMap() {
   map = L.map('map').setView([-0.5, 108.5], 5);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; OpenStreetMap contributors | PT PLN (Persero)'
+    attribution: '© OpenStreetMap contributors | PT PLN (Persero)'
   }).addTo(map);
   markersLayer = L.layerGroup().addTo(map);
 }
@@ -350,6 +350,7 @@ function parseGvizTable(table, program) {
     const getVal = (idx) => {
       if (idx < 0 || !cells[idx]) return '';
       const cell = cells[idx];
+      if (typeof cell.v === 'boolean') return cell.v;
       if (cell.v != null && cell.v !== '') return cell.v;
       if (cell.f != null) return cell.f;
       return '';
@@ -380,7 +381,7 @@ function parseGvizTable(table, program) {
       }
     }
 
-    // Parse Daya (di Sekolah Rakyat kolom Rencana Daya dalam kVA; di Vokasi/Terpadu biasanya VA -> dikonversi otomatis jika >= 10000)
+    // Parse Daya (di Sekolah Rakyat kolom Rencana Daya dalam kVA; di Vokasi/Terpadu biasanya VA -> dikonversi otomatis jika >= 1000)
     const dayaRaw = parseNum(getVal(idxMap.daya));
     const realisasiRaw = parseNum(getVal(idxMap.realisasiDaya));
     let dayaKva = 0;
@@ -390,14 +391,30 @@ function parseGvizTable(table, program) {
       dayaKva = dayaRaw >= 1000 ? dayaRaw / 1000 : dayaRaw;
     }
 
-    // Normalisasi Status Nyala
-    const rawNyala = String(getVal(idxMap.nyala)).trim();
-    const katNyala = String(getVal(idxMap.kategoriNyala)).trim();
-    const statusNyala = normalizeStatusNyala(rawNyala, katNyala, realisasiRaw);
+    // Normalisasi Status Nyala (mendukung boolean TRUE/FALSE dari Google Sheets maupun teks)
+    const valNyalaRaw = getVal(idxMap.nyala);
+    const rawNyala = typeof valNyalaRaw === 'boolean' ? (valNyalaRaw ? 'TRUE' : 'FALSE') : String(valNyalaRaw).trim();
+    const rawKatNyala = String(getVal(idxMap.kategoriNyala)).trim();
+    const katNyala = /^#NAME\?|^#REF!|^#VALUE!|^#N\/A|^#ERROR!/i.test(rawKatNyala) ? '' : rawKatNyala;
+    const statusNyala = normalizeStatusNyala(valNyalaRaw, katNyala, realisasiRaw);
 
-    // Normalisasi Kategori
-    const rawKat = String(getVal(idxMap.kategori)).trim();
-    const kategori = rawKat || katNyala || (program === 'RAKYAT' ? 'Sekolah Rakyat Tahap 3' : (program === 'TERPADU' ? 'Sekolah Terpadu' : 'Lainnya'));
+    // Normalisasi Kategori (abaikan error rumus #NAME? pada spreadsheet dan hitung kategori nyala secara otomatis)
+    const rawKatCell = String(getVal(idxMap.kategori)).trim();
+    const rawKat = /^#NAME\?|^#REF!|^#VALUE!|^#N\/A|^#ERROR!/i.test(rawKatCell) ? '' : rawKatCell;
+    const ketClean = String(getVal(idxMap.ket)).trim();
+    let computedRakyatKat = '';
+    if (program === 'RAKYAT') {
+      if (statusNyala === 'NYALA') {
+        computedRakyatKat = (realisasiRaw > 0 && dayaRaw > 0 && realisasiRaw < dayaRaw)
+          ? 'Nyala Butuh Tambah Daya'
+          : 'Nyala Sesuai Daya Tujuan';
+      } else if (/lahan kosong|pembebasan lahan|belum ada bangunan/i.test(ketClean)) {
+        computedRakyatKat = 'Belum Nyala (Lahan / Belum Ada Bangunan)';
+      } else {
+        computedRakyatKat = 'Belum Nyala (Proses / Survey)';
+      }
+    }
+    const kategori = rawKat || katNyala || computedRakyatKat || (program === 'TERPADU' ? 'Sekolah Terpadu' : 'Lainnya');
 
     const fotoUrl = String(getVal(idxMap.foto)).trim();
 
@@ -420,7 +437,7 @@ function parseGvizTable(table, program) {
       sr: parseNum(getVal(idxMap.sr)),
       rab: parseNum(getVal(idxMap.rab)),
       bp: parseNum(getVal(idxMap.bp)),
-      ket: String(getVal(idxMap.ket)).trim() || '-',
+      ket: ketClean || '-',
       fotoUrl: /^https?:\/\//i.test(fotoUrl) ? fotoUrl : '',
       lat: !isNaN(lat) && Math.abs(lat) <= 15 ? lat : null,
       lng: !isNaN(lng) && lng >= 90 && lng <= 145 ? lng : null
@@ -434,7 +451,6 @@ function parseNum(val) {
   if (!val) return 0;
   let s = String(val).replace(/[^0-9.,-]/g, '').trim();
   if (!s) return 0;
-  // Format Indonesia/Inggris: jika ada koma dan titik, tentukan pemisah desimal
   if (s.includes(',') && s.includes('.')) {
     if (s.lastIndexOf('.') > s.lastIndexOf(',')) {
       s = s.replace(/,/g, '');
@@ -454,8 +470,14 @@ function parseNum(val) {
 }
 
 function normalizeStatusNyala(raw, katNyala = '', realisasiDaya = 0) {
-  const combined = `${raw} ${katNyala}`.toLowerCase().trim();
+  if (raw === true) return 'NYALA';
+  if (raw === false) return realisasiDaya > 0 ? 'NYALA' : 'BELUM';
+  const rawStr = String(raw ?? '').toLowerCase().trim();
+  if (rawStr === 'true') return 'NYALA';
+  if (rawStr === 'false') return realisasiDaya > 0 ? 'NYALA' : 'BELUM';
   if (realisasiDaya > 0) return 'NYALA';
+
+  const combined = `${rawStr} ${katNyala}`.toLowerCase().trim();
   if (!combined) return 'BELUM';
   if (combined.includes('belum') || combined.includes('tidak') || combined.includes('proses') || combined.includes('lahan') || combined === '0' || combined === 'no') {
     return 'BELUM';
@@ -569,7 +591,7 @@ function updateMap() {
         ? `<div class="mt-2 pt-2 border-t border-slate-200">
              <a href="${escapeHtml(r.fotoUrl)}" target="_blank" rel="noopener"
                 class="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 hover:underline">
-                Lihat Foto Eviden Lapangan &rarr;
+                Lihat Foto Eviden Lapangan →
              </a>
            </div>`
         : '';
@@ -699,6 +721,7 @@ function updateTable() {
         <th class="px-3 py-3 font-semibold">Kab / Kota</th>
         <th class="px-3 py-3 font-semibold">Alamat Lokasi</th>
         <th class="px-3 py-3 font-semibold text-right">Rencana Daya (kVA)</th>
+        <th class="px-3 py-3 font-semibold text-right">Realisasi (kVA)</th>
         <th class="px-3 py-3 font-semibold text-right">JTM (kms)</th>
         <th class="px-3 py-3 font-semibold text-right">JTR (kms)</th>
         <th class="px-3 py-3 font-semibold text-right">Gardu (kVA)</th>
@@ -711,7 +734,7 @@ function updateTable() {
     `;
 
     if (filteredRows.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="14" class="px-4 py-8 text-center text-slate-400">Tidak ada data yang sesuai dengan filter.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="15" class="px-4 py-8 text-center text-slate-400">Tidak ada data yang sesuai dengan filter.</td></tr>`;
       return;
     }
 
@@ -725,6 +748,7 @@ function updateTable() {
           <td class="px-3 py-2.5 font-medium text-slate-800 whitespace-nowrap">${escapeHtml(r.kab)}</td>
           <td class="px-3 py-2.5 text-slate-600 max-w-[230px]">${escapeHtml(r.alamat)}</td>
           <td class="px-3 py-2.5 text-right font-semibold text-slate-800">${r.dayaKva ? r.dayaKva.toLocaleString('id-ID') : '-'}</td>
+          <td class="px-3 py-2.5 text-right font-semibold text-emerald-700">${r.realisasiKva ? r.realisasiKva.toLocaleString('id-ID') : '-'}</td>
           <td class="px-3 py-2.5 text-right text-slate-600">${r.jtm ? r.jtm.toLocaleString('id-ID') : '-'}</td>
           <td class="px-3 py-2.5 text-right text-slate-600">${r.jtr ? r.jtr.toLocaleString('id-ID') : '-'}</td>
           <td class="px-3 py-2.5 text-right text-slate-600">${r.gardu ? r.gardu.toLocaleString('id-ID') : '-'}</td>
@@ -795,12 +819,12 @@ function updateTable() {
 
 // ==================== CSV EXPORT ====================
 function exportFilteredCsv() {
-  const headers = ['Program', 'UID', 'Provinsi', 'Kab_Kota', 'Nama_Lokasi', 'Alamat', 'Kategori', 'Rencana_Daya_kVA', 'Status_Nyala', 'JTM_kms', 'JTR_kms', 'Gardu_kVA', 'RAB_Rp', 'BP_Rp', 'Keterangan', 'Foto_URL', 'Lat', 'Long'];
+  const headers = ['Program', 'UID', 'Provinsi', 'Kab_Kota', 'Nama_Lokasi', 'Alamat', 'Kategori', 'Rencana_Daya_kVA', 'Realisasi_Daya_kVA', 'Status_Nyala', 'JTM_kms', 'JTR_kms', 'Gardu_kVA', 'RAB_Rp', 'BP_Rp', 'Keterangan', 'Foto_URL', 'Lat', 'Long'];
   const csvLines = [headers.join(',')];
 
   filteredRows.forEach((r) => {
     const row = [
-      activeProgram, r.uid, r.prov, r.kab, r.sekolah, r.alamat, r.kategori, r.dayaKva,
+      activeProgram, r.uid, r.prov, r.kab, r.sekolah, r.alamat, r.kategori, r.dayaKva, r.realisasiKva,
       r.statusNyala === 'NYALA' ? 'Sudah Nyala' : 'Belum Nyala',
       r.jtm, r.jtr, r.gardu, r.rab, r.bp, r.ket, r.fotoUrl, r.lat ?? '', r.lng ?? ''
     ].map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`);
@@ -826,8 +850,8 @@ function formatRupiahShort(num) {
 
 function escapeHtml(str) {
   return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/&/g, '&')
+    .replace(/</g, '<')
+    .replace(/>/g, '>')
+    .replace(/"/g, '"');
 }
